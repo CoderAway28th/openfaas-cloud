@@ -2,6 +2,8 @@ package function
 
 import (
 	"archive/tar"
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,21 +16,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	hmac "github.com/alexellis/hmac"
 	"github.com/openfaas/faas-cli/stack"
+	"github.com/openfaas/openfaas-cloud/sdk"
 )
-
-type PushEvent struct {
-	Repository struct {
-		Name     string `json:"name"`
-		FullName string `json:"full_name"`
-		CloneURL string `json:"clone_url"`
-		Owner    struct {
-			Login string `json:"login"`
-			Email string `json:"email"`
-		} `json:"owner"`
-	}
-	AfterCommitID string `json:"after"`
-}
 
 type tarEntry struct {
 	fileName     string
@@ -41,12 +32,12 @@ type cfg struct {
 	Frontend *string `json:"frontend,omitempty"`
 }
 
-func parseYAML(pushEvent PushEvent, filePath string) (*stack.Services, error) {
+func parseYAML(pushEvent sdk.PushEvent, filePath string) (*stack.Services, error) {
 	parsed, err := stack.ParseYAMLFile(path.Join(filePath, "stack.yml"), "", "")
 	return parsed, err
 }
 
-func shrinkwrap(pushEvent PushEvent, filePath string) (string, error) {
+func shrinkwrap(pushEvent sdk.PushEvent, filePath string) (string, error) {
 	buildCmd := exec.Command("faas-cli", "build", "-f", "stack.yml", "--shrinkwrap")
 	buildCmd.Dir = filePath
 	err := buildCmd.Start()
@@ -58,7 +49,7 @@ func shrinkwrap(pushEvent PushEvent, filePath string) (string, error) {
 	return filePath, err
 }
 
-func makeTar(pushEvent PushEvent, filePath string, services *stack.Services) ([]tarEntry, error) {
+func makeTar(pushEvent sdk.PushEvent, filePath string, services *stack.Services) ([]tarEntry, error) {
 	tars := []tarEntry{}
 
 	fmt.Printf("Tar up %s\n", filePath)
@@ -77,7 +68,16 @@ func makeTar(pushEvent PushEvent, filePath string, services *stack.Services) ([]
 
 		base := filepath.Join(filePath, filepath.Join("build", k))
 
-		imageName := formatImageShaTag("registry:5000", &v, pushEvent.AfterCommitID)
+		pushRepositoryURL := os.Getenv("push_repository_url")
+
+		if len(pushRepositoryURL) == 0 {
+			fmt.Fprintf(os.Stderr, "push_repository_url env-var not set")
+			os.Exit(1)
+		}
+
+		imageName := formatImageShaTag(pushRepositoryURL, &v, pushEvent.AfterCommitID,
+			pushEvent.Repository.Owner.Login, pushEvent.Repository.Name)
+
 		config := cfg{
 			Ref: imageName,
 		}
@@ -140,22 +140,37 @@ func makeTar(pushEvent PushEvent, filePath string, services *stack.Services) ([]
 	return tars, nil
 }
 
-func formatImageShaTag(registry string, function *stack.Function, sha string) string {
+func formatImageShaTag(registry string, function *stack.Function, sha string, owner string, repo string) string {
 	tag := ":latest"
+
 	imageName := function.Image
 	tagIndex := strings.LastIndex(function.Image, ":")
+
 	if tagIndex > 0 {
 		tag = function.Image[tagIndex:]
 		imageName = function.Image[:tagIndex]
 	}
 
-	imageName = registry + "/" + imageName + tag + "-" + sha
-	return imageName
+	repoIndex := strings.LastIndex(imageName, "/")
+	if repoIndex > -1 {
+		imageName = imageName[repoIndex+1:]
+	}
+
+	var imageRef string
+	sharedRepo := strings.HasSuffix(registry, "/")
+	if sharedRepo {
+		imageRef = registry[:len(registry)-1] + "/" + owner + "-" + repo + "-" + imageName + tag + "-" + sha
+	} else {
+		imageRef = registry + "/" + owner + "/" + repo + "-" + imageName + tag + "-" + sha
+	}
+
+	return imageRef
 }
 
-func clone(pushEvent PushEvent) (string, error) {
+func clone(pushEvent sdk.PushEvent) (string, error) {
 	workDir := os.TempDir()
-	destPath := path.Join(workDir, pushEvent.Repository.Name)
+	destPath := path.Join(workDir, path.Join(pushEvent.Repository.Owner.Login, pushEvent.Repository.Name))
+
 	if _, err := os.Stat(destPath); err == nil {
 		truncateErr := os.RemoveAll(destPath)
 		if truncateErr != nil {
@@ -163,12 +178,21 @@ func clone(pushEvent PushEvent) (string, error) {
 		}
 	}
 
+	userDir := path.Join(workDir, pushEvent.Repository.Owner.Login)
+	err := os.MkdirAll(userDir, 0777)
+
+	if err != nil {
+		return "", fmt.Errorf("cannot create user-dir: %s", userDir)
+	}
+
 	git := exec.Command("git", "clone", pushEvent.Repository.CloneURL)
-	git.Dir = workDir
-	err := git.Start()
+	git.Dir = path.Join(workDir, pushEvent.Repository.Owner.Login)
+	log.Println(git.Dir)
+	err = git.Start()
 	if err != nil {
 		return "", fmt.Errorf("Cannot start git: %t", err)
 	}
+
 	err = git.Wait()
 
 	git = exec.Command("git", "checkout", pushEvent.AfterCommitID)
@@ -182,31 +206,118 @@ func clone(pushEvent PushEvent) (string, error) {
 	return destPath, err
 }
 
-func deploy(tars []tarEntry, owner string, repo string) error {
+func deploy(tars []tarEntry, pushEvent sdk.PushEvent, stack *stack.Services) error {
+
+	owner := pushEvent.Repository.Owner.Login
+	repoName := pushEvent.Repository.Name
+	url := pushEvent.Repository.CloneURL
+	afterCommitID := pushEvent.AfterCommitID
+	installationId := pushEvent.Installation.Id
 
 	c := http.Client{}
+	gatewayURL := os.Getenv("gateway_url")
 
 	for _, tarEntry := range tars {
-		fmt.Println("Deploy service - " + tarEntry.functionName)
+		fmt.Println("Deploying service - " + tarEntry.functionName)
 
 		fileOpen, err := os.Open(tarEntry.fileName)
 		if err != nil {
 			return err
 		}
 
-		httpReq, _ := http.NewRequest(http.MethodPost, "http://gateway:8080/function/buildshiprun", fileOpen)
+		httpReq, _ := http.NewRequest(http.MethodPost, gatewayURL+"function/buildshiprun", fileOpen)
 
-		httpReq.Header.Add("Repo", repo)
+		httpReq.Header.Add("Repo", repoName)
 		httpReq.Header.Add("Owner", owner)
+		httpReq.Header.Add("Url", url)
+		httpReq.Header.Add("Installation_id", fmt.Sprintf("%d", installationId))
 		httpReq.Header.Add("Service", tarEntry.functionName)
 		httpReq.Header.Add("Image", tarEntry.imageName)
+		httpReq.Header.Add("Sha", afterCommitID)
+
+		envJSON, marshalErr := json.Marshal(stack.Functions[tarEntry.functionName].Environment)
+		if marshalErr != nil {
+			log.Printf("Error marshaling %d env-vars for function %s, %s", len(stack.Functions[tarEntry.functionName].Environment), tarEntry.functionName, marshalErr)
+		}
+
+		httpReq.Header.Add("Env", string(envJSON))
+
+		secretsJSON, marshalErr := json.Marshal(stack.Functions[tarEntry.functionName].Secrets)
+		if marshalErr != nil {
+			log.Printf("Error marshaling secrets for function %s, %s", tarEntry.functionName, marshalErr)
+		}
+
+		httpReq.Header.Add("Secrets", string(secretsJSON))
 
 		res, reqErr := c.Do(httpReq)
 		if reqErr != nil {
-			return reqErr
+			fmt.Fprintf(os.Stderr, fmt.Errorf("unable to deploy function via buildshiprun: %s", reqErr.Error()).Error())
 		}
 
 		fmt.Println("Service deployed ", tarEntry.functionName, res.Status, owner)
 	}
+	return nil
+}
+
+func importSecrets(pushEvent sdk.PushEvent, stack *stack.Services, clonePath string) error {
+	gatewayURL := os.Getenv("gateway_url")
+
+	secretCount := 0
+	for _, fn := range stack.Functions {
+		secretCount += len(fn.Secrets)
+	}
+
+	owner := pushEvent.Repository.Owner.Login
+	secretPath := path.Join(clonePath, "secrets.yml")
+
+	// No secrets supplied.
+	if fileInfo, err := os.Stat(secretPath); fileInfo == nil || err != nil {
+		return nil
+	}
+
+	fileBytes, err := ioutil.ReadFile(secretPath)
+
+	if err != nil {
+		return fmt.Errorf("unable to read secret: %s", secretPath)
+	}
+
+	webhookSecretKey := os.Getenv("github_webhook_secret")
+	hash := hmac.Sign(fileBytes, []byte(webhookSecretKey))
+
+	c := http.Client{}
+	reader := bytes.NewReader(fileBytes)
+	httpReq, _ := http.NewRequest(http.MethodPost, gatewayURL+"function/import-secrets", reader)
+
+	httpReq.Header.Add("Owner", owner)
+	httpReq.Header.Add("X-Hub-Signature", "sha1="+hex.EncodeToString(hash))
+
+	res, reqErr := c.Do(httpReq)
+
+	if reqErr != nil {
+		fmt.Fprintf(os.Stderr, fmt.Errorf("error reaching import-secrets function: %s", reqErr.Error()).Error())
+	}
+
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusAccepted && res.StatusCode != http.StatusOK {
+		resBytes, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response from import-secrets: %s", err.Error())
+		}
+
+		return fmt.Errorf("import-secrets returned error: %s, res: %s", err.Error(), string(resBytes))
+	}
+
+	auditEvent := sdk.AuditEvent{
+		Message: fmt.Sprintf("Parsed sealed secrets for owner: %s. Parsed %d secrets, from %d functions", owner, secretCount, len(stack.Functions)),
+		Owner:   pushEvent.Repository.Owner.Login,
+		Repo:    pushEvent.Repository.Name,
+		Source:  Source,
+	}
+
+	sdk.PostAudit(auditEvent)
+
+	fmt.Println("Parsed sealed secrets", res.Status, owner)
+
 	return nil
 }

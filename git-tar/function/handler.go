@@ -11,15 +11,18 @@ import (
 	"time"
 
 	"github.com/openfaas/faas-cli/stack"
+	"github.com/openfaas/openfaas-cloud/sdk"
 )
+
+const Source = "git-tar"
 
 // Handle a serverless request
 func Handle(req []byte) []byte {
 
-	pushEvent := PushEvent{}
+	pushEvent := sdk.PushEvent{}
 	err := json.Unmarshal(req, &pushEvent)
 	if err != nil {
-		log.Println(err.Error())
+		log.Printf("cannot unmarshal git-tar request %s '%s'", err.Error(), string(req))
 		os.Exit(-1)
 	}
 
@@ -49,21 +52,29 @@ func Handle(req []byte) []byte {
 		os.Exit(-1)
 	}
 
-	err = deploy(tars, pushEvent.Repository.Owner.Login, pushEvent.Repository.Name)
+	err = importSecrets(pushEvent, stack, clonePath)
 	if err != nil {
-		log.Println(err)
+		log.Printf("Error parsing secrets: %s\n", err.Error())
+		os.Exit(-1)
+	}
+
+	err = deploy(tars, pushEvent, stack)
+	if err != nil {
+		log.Printf("deploy error: %s", err)
 	}
 
 	err = collect(pushEvent, stack)
 	if err != nil {
-		log.Println(err)
+		log.Printf("collect error: %s", err)
 	}
 
 	return []byte(fmt.Sprintf("Deployed tar from: %s", tars))
 }
 
-func collect(pushEvent PushEvent, stack *stack.Services) error {
+func collect(pushEvent sdk.PushEvent, stack *stack.Services) error {
 	var err error
+
+	gatewayURL := os.Getenv("gateway_url")
 
 	garbageReq := GarbageRequest{
 		Owner: pushEvent.Repository.Owner.Login,
@@ -80,7 +91,7 @@ func collect(pushEvent PushEvent, stack *stack.Services) error {
 
 	bytesReq, _ := json.Marshal(garbageReq)
 	bufferReader := bytes.NewBuffer(bytesReq)
-	request, _ := http.NewRequest(http.MethodPost, "http://gateway:8080/function/garbage-collect", bufferReader)
+	request, _ := http.NewRequest(http.MethodPost, gatewayURL+"function/garbage-collect", bufferReader)
 
 	response, err := c.Do(request)
 

@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/openfaas/openfaas-cloud/sdk"
 )
 
 // Handle a serverless request
@@ -33,9 +35,15 @@ func Handle(req []byte) string {
 		Timeout: time.Second * 3,
 	}
 
-	request, _ := http.NewRequest(http.MethodGet, "http://gateway:8080/system/functions", nil)
+	gatewayURL := os.Getenv("gateway_url")
 
-	response, err := c.Do(request)
+	httpReq, _ := http.NewRequest(http.MethodGet, gatewayURL+"system/functions", nil)
+	addAuthErr := sdk.AddBasicAuth(httpReq)
+	if addAuthErr != nil {
+		log.Printf("Basic auth error %s", addAuthErr)
+	}
+
+	response, err := c.Do(httpReq)
 	filtered := []function{}
 
 	if err == nil {
@@ -43,6 +51,10 @@ func Handle(req []byte) string {
 		bodyBytes, bErr := ioutil.ReadAll(response.Body)
 		if bErr != nil {
 			log.Fatal(bErr)
+		}
+
+		if response.StatusCode != http.StatusOK {
+			log.Fatalf("unable to query functions, status: %d, message: %s", response.StatusCode, string(bodyBytes))
 		}
 
 		functions := []function{}
@@ -56,7 +68,6 @@ func Handle(req []byte) string {
 				if k == "Git-Owner" && v == user {
 					// Hide internal-repo details
 					fn.Image = fn.Image[strings.Index(fn.Image, "/")+1:]
-
 					filtered = append(filtered, fn)
 				}
 			}
@@ -68,7 +79,9 @@ func Handle(req []byte) string {
 }
 
 type function struct {
-	Name   string            `json:"name"`
-	Image  string            `json:"image"`
-	Labels map[string]string `json:"labels"`
+	Name            string            `json:"name"`
+	Image           string            `json:"image"`
+	InvocationCount float64           `json:"invocationCount"`
+	Replicas        uint64            `json:"replicas"`
+	Labels          map[string]string `json:"labels"`
 }

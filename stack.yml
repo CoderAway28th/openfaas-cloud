@@ -1,18 +1,22 @@
 provider:
   name: faas
-  gateway: http://localhost:8080
+  gateway: http://127.0.0.1:8080
 
 functions:
-  gh-push:
+  github-push:
     lang: go
-    handler: ./gh-push
-    image: alexellis2/gh-push:0.1.1
+    handler: ./github-push
+    image: alexellis2/github-push:0.4.2
+    labels:
+      openfaas-cloud: "1"
     environment:
-      Http_X_Github_Event: push
-      read_timeout: 5
-      write_timeout: 5
+      # Http_X_Github_Event: push
+      validate_hmac: true
+      read_timeout: 10s
+      write_timeout: 10s
       write_debug: true
       read_debug: true
+      validate_customers: true
       customers_url: "https://raw.githubusercontent.com/openfaas/openfaas-cloud/master/CUSTOMERS"
     environment_file:
       - gateway_config.yml
@@ -21,10 +25,12 @@ functions:
   git-tar:
     lang: dockerfile
     handler: ./git-tar
-    image: alexellis2/of-git-tar:0.2.1
+    image: alexellis2/of-git-tar:0.6.7
+    labels:
+      openfaas-cloud: "1"
     environment:
-      read_timeout: 120
-      write_timeout: 120
+      read_timeout: 15m
+      write_timeout: 15m
       write_debug: true
       read_debug: true
     environment_file:
@@ -33,43 +39,62 @@ functions:
   buildshiprun:
     lang: go
     handler: ./buildshiprun
-    image: alexellis2/of-buildshiprun:0.0.1
+    image: alexellis2/of-buildshiprun:0.4.7
+    labels:
+      openfaas-cloud: "1"
     environment:
-      read_timeout: 300
-      write_timeout: 300
+      read_timeout: 5m
+      write_timeout: 5m
       write_debug: true
       read_debug: true
-      builder_url: http://of-builder:8080/
+      builder_url: http://of-builder.openfaas:8080/
     environment_file:
-      - buildshiprun_limits_swarm.yml
+      - buildshiprun_limits_k8s.yml
       - gateway_config.yml
+      - github.yml
+    secrets:
+      - private-key
+      - basic-auth-user
+      - basic-auth-password
 
   list-functions:
     lang: go
     handler: ./list-functions
-    image: alexellis2/list-functions:0.1
+    image: alexellis2/list-functions:0.4.2
+    labels:
+      openfaas-cloud: "1"
     environment:
       write_debug: true
       read_debug: true
     environment_file:
       - gateway_config.yml
+    secrets:
+      - basic-auth-user
+      - basic-auth-password
 
   garbage-collect:
     lang: go
     handler: ./garbage-collect
-    image: alexellis2/garbage-collect:0.1
+    image: alexellis2/garbage-collect:0.3.2
+    labels:
+      openfaas-cloud: "1"
     environment:
       write_debug: true
       read_debug: true
-      read_timeout: 30
-      write_timeout: 30
+      read_timeout: 30s
+      write_timeout: 30s
     environment_file:
       - gateway_config.yml
-      
-  git-event:
+    secrets:
+      - basic-auth-user
+      - basic-auth-password
+
+  github-event:
     lang: go
-    handler: ./git-event
-    image: alexellis2/git-event:0.1
+    handler: ./github-event
+    image: alexellis2/github-event:0.4.2
+    labels:
+      openfaas-cloud: "1"
     environment:
       write_debug: true
       read_debug: true
@@ -77,3 +102,33 @@ functions:
       - github.yml
       - gateway_config.yml
 
+  import-secrets:
+    lang: go
+    handler: ./import-secrets
+    image: alexellis2/import-secrets:0.2.1
+    labels:
+      openfaas-cloud: "1"
+    environment:
+      write_debug: true
+      read_debug: true
+      validate_hmac: true
+      combined_output: false
+    environment_file:
+      - github.yml
+
+  echo:
+    skip_build: true
+    image: functions/alpine:latest
+    fprocess: cat
+    environment:
+      write_debug: true
+      read_debug: true
+
+  audit-event:
+    lang: go
+    handler: ./audit-event
+    image: functions/audit-event:0.1.0
+    labels:
+      openfaas-cloud: "1"
+    environment_file:
+      - slack.yml

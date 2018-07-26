@@ -2,4 +2,10 @@ template
 build
 .vscode
 image
+*.pem
+
+secrets.yml
+
+kubeseal-darwin-amd64
+private-key
 

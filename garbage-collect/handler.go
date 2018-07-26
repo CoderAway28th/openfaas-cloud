@@ -7,7 +7,10 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"time"
+
+	"github.com/openfaas/openfaas-cloud/sdk"
 )
 
 // Handle a serverless request
@@ -18,37 +21,48 @@ func Handle(req []byte) string {
 	if err != nil {
 		log.Panic(err)
 	}
-	fmt.Println("garbageReq", garbageReq)
-	list, err := listFunctions(garbageReq.Owner)
+
+	gatewayURL := os.Getenv("gateway_url")
+	deployedFunctions, err := listFunctions(garbageReq.Owner, gatewayURL)
+
 	if err != nil {
 		log.Panic(err)
 	}
-	fmt.Println("list: ", list)
 
-	for _, fn := range list {
-		found := false
-		for _, deployed := range garbageReq.Functions {
-			target := garbageReq.Owner + "-" + deployed
-			log.Println(fn, target)
+	fmt.Printf("Functions owned by %s:\n %s", garbageReq.Owner, deployedFunctions)
 
-			if fn == target {
-				found = true
-				break
-			}
-		}
-
-		if !found {
-			err = deleteFunction(garbageReq.Owner + "-" + fn)
-			if err != nil {
-				log.Println(err)
+	deleted := 0
+	for _, fn := range deployedFunctions {
+		if fn.GetRepo() == garbageReq.Repo {
+			if !included(&fn, garbageReq.Owner, garbageReq.Functions) {
+				err = deleteFunction(fn.Name, gatewayURL)
+				deleted = deleted + 1
+				if err != nil {
+					log.Println(err)
+				}
 			}
 		}
 	}
 
-	return fmt.Sprintf("Hello, Go. You said: %s", string(req))
+	return fmt.Sprintf("Garbage collection ran for %s/%s - %d functions deleted.", garbageReq.Owner, garbageReq.Repo, deleted)
 }
 
-func deleteFunction(target string) error {
+func formatCloudName(name, owner string) string {
+	return owner + "-" + name
+}
+
+func included(fn *openFaaSFunction, owner string, functionStack []string) bool {
+
+	for _, name := range functionStack {
+		if formatCloudName(name, owner) == fn.Name {
+			return true
+		}
+	}
+
+	return false
+}
+
+func deleteFunction(target, gatewayURL string) error {
 	var err error
 	fmt.Println("Delete ", target)
 
@@ -56,16 +70,21 @@ func deleteFunction(target string) error {
 		Timeout: time.Second * 3,
 	}
 	delReq := struct {
-		Name string
+		FunctionName string
 	}{
-		Name: target,
+		FunctionName: target,
 	}
 
 	bytesReq, _ := json.Marshal(delReq)
 	bufferReader := bytes.NewBuffer(bytesReq)
-	request, _ := http.NewRequest(http.MethodDelete, "http://gateway:8080/system/functions", bufferReader)
+	httpReq, _ := http.NewRequest(http.MethodDelete, gatewayURL+"system/functions", bufferReader)
 
-	response, err := c.Do(request)
+	addAuthErr := sdk.AddBasicAuth(httpReq)
+	if addAuthErr != nil {
+		log.Printf("Basic auth error %s", addAuthErr)
+	}
+
+	response, err := c.Do(httpReq)
 
 	if err == nil {
 		defer response.Body.Close()
@@ -81,38 +100,38 @@ func deleteFunction(target string) error {
 	return err
 }
 
-func listFunctions(owner string) ([]string, error) {
+func listFunctions(owner, gatewayURL string) ([]openFaaSFunction, error) {
+
 	var err error
-	var functions []string
 
 	c := http.Client{
 		Timeout: time.Second * 3,
 	}
 
-	request, _ := http.NewRequest(http.MethodGet, "http://gateway:8080/system/functions", nil)
+	request, _ := http.NewRequest(http.MethodGet, gatewayURL+"/function/list-functions?user="+owner, nil)
 
 	response, err := c.Do(request)
 
 	if err == nil {
 		defer response.Body.Close()
+
 		if response.Body != nil {
 			bodyBytes, bErr := ioutil.ReadAll(response.Body)
 			if bErr != nil {
 				log.Fatal(bErr)
 			}
 
-			functionList := []function{}
-			mErr := json.Unmarshal(bodyBytes, &functionList)
+			functions := []openFaaSFunction{}
+			mErr := json.Unmarshal(bodyBytes, &functions)
 			if mErr != nil {
 				log.Fatal(mErr)
 			}
-			for _, fn := range functionList {
-				functions = append(functions, fn.Name)
-			}
+
+			return functions, nil
 		}
 	}
 
-	return functions, err
+	return nil, fmt.Errorf("no functions found for user: %s", owner)
 }
 
 type GarbageRequest struct {
@@ -121,8 +140,16 @@ type GarbageRequest struct {
 	Owner     string   `json:"owner"`
 }
 
-type function struct {
+type openFaaSFunction struct {
 	Name   string            `json:"name"`
 	Image  string            `json:"image"`
 	Labels map[string]string `json:"labels"`
+}
+
+func (f *openFaaSFunction) GetOwner() string {
+	return f.Labels["Git-Owner"]
+}
+
+func (f *openFaaSFunction) GetRepo() string {
+	return f.Labels["Git-Repo"]
 }

@@ -1,30 +1,64 @@
 OpenFaaS Cloud
 ==============
 
-OpenFaaS Cloud - FaaS in a box with CI/CD for functions
+OpenFaaS Cloud - GitOps for your functions with native GitHub integrations
+
+![https://pbs.twimg.com/media/DacWCtZVMAAJQ-u.jpg](https://pbs.twimg.com/media/DacWCtZVMAAJQ-u.jpg)
+
+*Announcement from Cisco's DevNet Create in Mountain View*
 
 ## Description
 
-OpenFaaS Cloud uses serverless functions to provide a closed-loop CI/CD system for functions built and hosted on your public GitHub repositories.
+OpenFaaS Cloud uses serverless functions to provide a closed-loop CI/CD system for functions built and hosted on your public GitHub repositories. Just push your OpenFaaS functions to your public repo and within seconds you'll get a notificaiton with your HTTPS endpoint direcly on GitHub.
 
-OpenFaaS Cloud packages, builds and deploys functions using OpenFaaS functions written in Golang. Moby's BuildKit is used to build images and push to a local Docker registry instance.
+OpenFaaS Cloud packages, builds and deploys functions using OpenFaaS. Moby's BuildKit is used to build images and push to a local Docker registry instance.
 
 Features:
 
 * Applies GitOps principles - GitHub is the single source of truth
 * To build and deploy a new version of a function - just push to your GitHub repo
 * Subscription to OpenFaaS Cloud is done via a single click using a GitHub App
-* Secured through HMAC - the public facing function "gh-push" uses HMAC to verify the origin of events
+* Secured through HMAC - the public facing function "github-push" uses HMAC to verify the origin of events
+* HTTPS endpoint and build notifications for your commits
 
-Conceptual diagram
+## Blog post
 
-![](https://pbs.twimg.com/media/DZ7SX6gX4AA5dS7.jpg:large)
+Read my [introducing OpenFaaS Cloud](https://blog.alexellis.io/introducing-openfaas-cloud/) blog post for an overview of the idea with examples, screenshots and background on the project.
+
+## Road map
+
+* Core experience
+
+- [x] Quick deployment on Docker Swarm
+- [x] GitHub Status API integration for commits
+- [x] Kubernetes deployment YAML/helm (in progress)
+- [x] Automatic secure HTTPS endpoints
+- [x] Free, private-trial with CUSTOMER list
+- [x] HMAC with GitHub App for security
+- [x] Rate limiting for functions
+- [x] CI/CD for OpenFaaS Cloud
+- [x] Builds with BuildKit
+
+* Developer story
+
+- [x] UI: [Dashboard per user](./dashboard)
+- [x] Support secrets in public repos through SealedSecrets
+- [ ] Make build logs available publicly
+- [ ] Gateway deployments/promotions - i.e. only upon GitHub tag or "release"
+- [ ] Make detailed logs available to show build / unit test failures
+
+* Operationalize
+- [x] Support for shared Docker Hub account instead of local registry
+- [ ] Unprivileged builds with BuildKit or similar (help wanted)
+- [x] Isolation between functions (NetworkPolicy)
+- [ ] Support for private repos (help wanted)
+- [ ] Integration with on-prem GitLab/BitBucket (help wanted)
 
 ## Functions
 
-OpenFaaS Cloud is built using Golang functions to interact with GitHub and build/deploy your functions just seconds after your `git push`.
+OpenFaaS Cloud is built using OpenFaaS Golang functions to interact with GitHub and build/deploy your functions just seconds after your `git push`.
 
-* Function: gh-push
+* Function: github-push
 
 Receives events from the GitHub app and checks the origin via HMAC
 
@@ -44,72 +78,22 @@ Function cleans up functions which were removed or renamed within the repo for t
 
 * Service: of-builder
 
-A buildkit HTTP daemon which builds the image and pushes it to the internal registry. The image is tagged with the SHA of the Git commit event.
+A builder daemon which exposes the GRPC of-buildkit service via HTTP.
+
+* Service: of-buildkit
+
+The buildkit GRPC daemon which builds the image and pushes it to the internal registry. The image is tagged with the SHA of the Git commit event.
 
 * Service: Docker open-source registry
 
 A private, local registry is deployed inside the cluster.
 
-![](https://pbs.twimg.com/media/DZiif9QXcAEd8If.jpg:large)
+## Try it out
 
-## Usage
+![](https://pbs.twimg.com/media/DZ7SX6gX4AA5dS7.jpg:large)
 
-You can set up and host your own *OpenFaaS Cloud* or contact alex@openfaas.com for instructions on how to participate in a public trial of a fully-hosted service.
+*Conceptual diagram of how OpenFaaS Cloud integrates with GitHub*
 
-## Development
+You can set up and host your own *OpenFaaS Cloud* or contact alex@openfaas.com for instructions on how to participate in a public trial of a fully-hosted service. Read the privacy statement and terms and conditions for the hosted version of [OpenFaaS Cloud](./PRIVACY.md).
 
-* Before you start deploy OpenFaaS
-
-Deploy OpenFaaS on Docker Swarm using the instructions in the documentation. Kubernetes will also work but you will need to set up your own YAML files.
-
-https://docs.openfaas.com/deployment/
-
-* Create a GitHub app
-
-Before you start you'll need to create a free GitHub app and select the relevant OAuth permissions. Right now those are just read-only and subscriptions to "push" events.
-
-The GitHub app will deliver webhooks to your OpenFaaS Cloud instance every time code is pushed in a user's function repository. Make sure you provide the public URL for your OpenFaaS gateway to the GitHub app.
-
-* Create `github.yml` and populate it with your secrets as configured on the GitHub App:
-
-```
-environment:
-    github_webhook_secret: "Long-Password-Goes-Here"
-```
-
-The shared secret is used to securely verify each message came from GitHub and not a third party.
-
-* Update the remote gateway URL in `stack.yml` or set the `OPENFAAS_URL` environmental variable.
-
-```
-provider:
-  name: faas
-  gateway: http://localhost:8080
-
-```
-
-* Deploy the registry and of-builder
-
-Using the instructions given in the repo deploy of-builder (buildkit as a HTTP service) and the registry
-
-https://github.com/openfaas/openfaas-cloud/tree/master/of-builder
-
-* Build/deploy
-
-> Before running this build/push/deploy script change the Docker Hub image prefix from `alexellis2/` to your own.
-
-```
-$ faas-cli build --parallel=4 \
-  && faas-cli push --parallel=4 \
-  && faas-cli deploy
-```
-
-* Test it out
-
-Simply install your GitHub app to one of your OpenFaaS function repos and push a commit.
-
-Within a few seconds you'll have your function deployed and live with a prefix of your username.
-
-* Find out more
-
-For more information get in touch directly for a private trial of the public service.
+Read the [development guide](docs/DEV.md) to find out more about the functions and to start hacking on OpenFaaS Cloud.
